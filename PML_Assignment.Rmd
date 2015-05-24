@@ -1,0 +1,148 @@
+---
+title: "PML Assignment"
+author: "Bodil Biering"
+date: "19 May 2015"
+output: html_document
+---
+# Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+
+The goal of the project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. 
+
+
+## Exploring the data
+```{r downloaddata, cache=TRUE }
+#download training data
+if(!file.exists("./data")){dir.create("./data")}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileUrl, destfile = "./data/SmartphoneDataTraining", method = "curl")
+
+dateDownloaded <- date()
+trainData <- read.csv("./data/SmartphoneDataTraining")
+```
+Let's do a little exploration of the data set.
+```{r}
+dim(trainData)
+str(trainData)
+```
+
+We see that the dataset has 160 variables and 19622 observations. And it seems some of the columns has mostly NA's:
+```{r}
+manyNA <- apply(trainData, 2, function(x) sum(is.na(x)) > 19200)
+sum(manyNA)
+```
+67 columns have  more than 19200 NA's out of 19622 observations, so these will not be likely to make good predictors.
+
+##Cleaning the data
+We remove the 67 columns that contain mostly NA's plus some columns that contain timestamps, usernames etc.
+We also remove variables with near zero variance since these will not help give us good predictions.
+
+```{r}
+require(caret)
+library(rpart)
+set.seed(117)
+#remove near zero variance predictors
+nsv <- nearZeroVar(trainData, saveMetrics = T)
+trainClean <- trainData[,!nsv$nzv]
+
+#remove columns that are not useful for predictions, such as username, timestamp, etc:
+trainClean <- trainClean[, -(1:5)]
+
+#remove columns with mostly NA's:
+manyNA <- apply(trainClean, 2, function(x) sum(is.na(x)) > 19200)
+trainClean <- trainClean[,!manyNA]
+```
+
+Find the index for the outcome.
+```{r}
+grep("classe", colnames(trainClean)) #54
+```
+##Preprocess
+
+Since we have removed all NA's from the dataset, there is no need to knnImpute. We could consider preprocessing with pca, but let's keep it simple.
+
+We are given a dataset called trainingdata and there is a testdataset of 20 testcases. We now partition the trainingdata into a trainingset (60%) and a testset (40%), leaving the 20 testcases out, since these are for the submission and we cannot use them to estimate the out of sample error.
+###Partitioning the dataset
+```{r}
+#create partition
+inTrain <- createDataPartition(y = trainClean$classe, p = 0.6, list = F)
+trainSet <- trainClean[inTrain,]
+testSet <- trainClean[-inTrain,]
+```
+
+
+## Cross validation
+I have chosen to use k-fold cross validation, i.e., splitting the training data into 5 subsets, and using the subsets in turn as test set. Cross validation is done on the training set and we can use the caret package's trainControl function for this.
+
+```{r}
+#setting up cross validation
+fitControl <- trainControl(## 5-fold CV
+                           method = "repeatedcv",
+                           number = 5,
+                           ## repeated ten times
+                           repeats = 5)
+
+preProc <- preProcess(trainSet[,-54])
+trainSetPC <- predict(preProc, trainSet[,-54])
+```
+
+
+
+## Choosing a model 
+The first model we try is a simple decision tree model:
+```{r rpart, cache=TRUE}
+#decision tree model
+rpartFit <- train(trainSet$classe ~ ., data = trainSetPC,
+                 method = "rpart",
+                 trControl = fitControl)
+rpartFit
+```
+We see that it doesn't do very well on accuracy.
+
+Let's try a boosting model instead:
+```{r gbm, cache=TRUE}
+#boosting model
+gbmFit <- train(trainSet$classe ~ ., data = trainSetPC,
+                 method = "gbm",
+                 trControl = fitControl,
+                 ## This last option is actually one
+                 ## for gbm() that passes through
+                 verbose = FALSE)
+gbmFit
+```
+The boosting model has a much higher accuracy. 
+We can also compare the confusionmatrices of the two models:
+```{r}
+confusionMatrix(rpartFit)
+confusionMatrix(gbmFit)
+
+```
+
+Random forest model would probably also do a good job, but it takes a while to build these models, so let's leave it at that and choose the boosting model.
+
+We now use our predictor on the testdata to estimate the out of sample error rate:
+## Testing the model
+```{r}
+#testing only on the chosen model!
+testPC <- predict(preProc, testSet[,-54])
+#gbm model
+predictionsgbm <- predict(gbmFit, testPC)
+#out of sample error estimate:
+confusionMatrix(testSet$classe, predictionsgbm)
+```
+
+### Out of sample error
+```{r}
+#rate of correct predictions:
+outOfSampleAccuracy <- sum(predictionsgbm == testSet$classe)/length(predictionsgbm)
+#out of sample error:
+1-outOfSampleAccuracy
+```
+So the estimatet out of sample error is 1.4%.
+
+## Conclusions
+We compared two models on the training set - decision trees and boosting, and found that boosting was a more accurate model for this dataset. The training in of both models was done using 5 fold cross validation. We used the testset to estimate the out of sample error, and found it to be 1.4%.
+
